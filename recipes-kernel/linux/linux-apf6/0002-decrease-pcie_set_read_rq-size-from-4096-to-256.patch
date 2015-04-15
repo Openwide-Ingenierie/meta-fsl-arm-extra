@@ -11,12 +11,12 @@ diff --git a/drivers/ata/sata_sil24.c b/drivers/ata/sata_sil24.c
 index 59f0d63..e728b8e 100644
 --- a/drivers/ata/sata_sil24.c
 +++ b/drivers/ata/sata_sil24.c
-@@ -1336,7 +1336,7 @@ static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+@@ -1336,8 +1336,7 @@ static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
  	/* Set max read request size to 4096.  This slightly increases
  	 * write throughput for pci-e variants.
  	 */
 -	pcie_set_readrq(pdev, 4096);
-+	pcie_set_readrq(pdev, 1024);
++	pcie_set_readrq(pdev, 256);
  
  	sil24_init_controller(host);
  
