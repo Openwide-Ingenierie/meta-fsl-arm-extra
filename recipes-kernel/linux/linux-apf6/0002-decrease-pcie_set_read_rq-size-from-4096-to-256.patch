@@ -1,7 +1,7 @@
-From 90cf8e084b81a0a66a5765f8f20f237797a19336 Mon Sep 17 00:00:00 2001
-From: Mallory Daries <mallory.daries@openwide.fr>
-Date: Tue, 10 Mar 2015 14:10:36 +0100
-Subject: [PATCH 2/2] decrease pcie_set_read_rq size from 4096 to 256
+From a83813fb401c29a9a2eff6b7140c1ee96d278afd Mon Sep 17 00:00:00 2001
+From: Nicolas Aguirre <nicolas.aguirre@openwide.fr>
+Date: Wed, 15 Apr 2015 12:56:51 +0200
+Subject: [PATCH] decrease pcie_set_read_rq size from 4096 to 256
 
 ---
  drivers/ata/sata_sil24.c | 2 +-
@@ -11,7 +11,7 @@ diff --git a/drivers/ata/sata_sil24.c b/drivers/ata/sata_sil24.c
 index 59f0d63..e728b8e 100644
 --- a/drivers/ata/sata_sil24.c
 +++ b/drivers/ata/sata_sil24.c
-@@ -1336,8 +1336,7 @@ static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+@@ -1336,7 +1336,7 @@ static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
  	/* Set max read request size to 4096.  This slightly increases
  	 * write throughput for pci-e variants.
  	 */
