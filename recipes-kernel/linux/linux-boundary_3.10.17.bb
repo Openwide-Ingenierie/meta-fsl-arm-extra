@@ -7,6 +7,8 @@ require recipes-kernel/linux/linux-dtb.inc
 SUMMARY = "Linux kernel for Boundary Devices boards"
 
 SRC_URI = "git://github.com/boundarydevices/linux-imx6.git;branch=${SRCBRANCH} \
+           file://add-ct363-driver.patch \
+	   file://add-ct363-to-sabrelite-devicetree.patch \
            file://defconfig"
 
 LOCALVERSION = "-1.0.2_ga+yocto"

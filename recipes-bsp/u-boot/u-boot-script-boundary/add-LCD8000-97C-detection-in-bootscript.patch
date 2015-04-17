@@ -1,0 +1,23 @@
+diff --git a/board/boundary/nitrogen6x/6x_bootscript-yocto.txt b/board/boundary/nitrogen6x/6x_bootscript-yocto.txt
+index 30e77a0..6d10d06 100644
+--- a/board/boundary/nitrogen6x/6x_bootscript-yocto.txt
++++ b/board/boundary/nitrogen6x/6x_bootscript-yocto.txt
+@@ -83,6 +83,18 @@ else
+ 	echo "------ no 800x480 display";
+ fi
+ 
++if i2c probe 0x7f ; then
++	setenv bootargs $bootargs video=mxcfb${nextcon}:dev=ldb,1024x768M@60,if=RGB666
++	if test "0" -eq $nextcon; then
++		setenv fbmem "fbmem=10M";
++	else
++		setenv fbmem ${fbmem},10M
++	fi
++	setexpr nextcon $nextcon + 1
++else
++	echo "------ no LCD8000-97C display module";
++fi
++
+ while test "4" -ne $nextcon ; do
+ 	setenv bootargs $bootargs video=mxcfb${nextcon}:off ;
+ 	setexpr nextcon $nextcon + 1 ;

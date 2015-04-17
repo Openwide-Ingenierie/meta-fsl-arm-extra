@@ -1,0 +1,496 @@
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index d9ea01f..0693cf6 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -946,4 +946,15 @@ config TOUCHSCREEN_TPS6507X
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called tps6507x_ts.
+ 
++config TOUCHSCREEN_CT363
++	tristate "CT363 based touchscreens"
++	depends on I2C && OF
++	help
++	  Say Y here if you have a VTL CT363 based touchscreen.
++
++	  If unsure, say N.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called ct363_ts.
++
+ endif
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index f76960f..0f7186e 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -76,3 +76,4 @@ obj-$(CONFIG_TOUCHSCREEN_WM97XX_MAINSTONE)	+= mainstone-wm97xx.o
+ obj-$(CONFIG_TOUCHSCREEN_WM97XX_ZYLONITE)	+= zylonite-wm97xx.o
+ obj-$(CONFIG_TOUCHSCREEN_W90X900)	+= w90p910_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_TPS6507X)	+= tps6507x-ts.o
++obj-$(CONFIG_TOUCHSCREEN_CT363)		+= ct363_ts.o
+diff --git a/drivers/input/touchscreen/ct363_ts.c b/drivers/input/touchscreen/ct363_ts.c
+new file mode 100644
+index 0000000..21e0c45
+--- /dev/null
++++ b/drivers/input/touchscreen/ct363_ts.c
+@@ -0,0 +1,461 @@
++#include <linux/of_gpio.h>
++#include <linux/device.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/input.h>
++#include <linux/i2c.h>
++#include <linux/delay.h>
++#include <linux/time.h>
++#include <linux/err.h>
++#include <linux/interrupt.h>
++#include <linux/input/mt.h>
++
++#define CT363_TS_MAX_POINT (10)
++
++struct ct363_ts_pointer {
++	unsigned char xhi;           // X coordinate High (x & 0xff0)
++	unsigned char yhi;           // Y coordinate High (y & 0xff0)
++	unsigned char ylo : 4;       // Y coordinate Low  (u & 0x00f)
++	unsigned char xlo : 4;       // X coordinate Low  (x & 0x00f)
++	unsigned char status : 3;    // action: 1: Down; 2: Move; 3: Up
++	unsigned char id : 5;        // ID, from 1 to CT363_TS_MAX_POINT
++	unsigned char area;          // touch area
++	unsigned char pressure;      // touch pressure
++};
++
++struct ct363_ts {
++	struct i2c_client *client;
++	struct input_dev  *input_dev;
++
++	char              phys[32];
++	int               irq;
++	int               irq_gpio;
++	int               reset_gpio;
++	int               reset_gpio_active_low;
++
++	int               max_x;
++	int               max_y;
++	int               orientation[4];
++	int               point_num;
++
++	union {
++		struct ct363_ts_pointer pts[CT363_TS_MAX_POINT];
++		char buf[CT363_TS_MAX_POINT * sizeof(struct ct363_ts_pointer)];
++	};
++};
++
++static int ct363_ts_open(struct input_dev *input_dev)
++{
++	struct ct363_ts *ts = input_get_drvdata(input_dev);
++
++	enable_irq(ts->irq);
++
++	return 0;
++}
++
++static void ct363_ts_close(struct input_dev *input_dev)
++{
++	struct ct363_ts *ts = input_get_drvdata(input_dev);
++
++	disable_irq(ts->irq);
++}
++
++static irqreturn_t ct363_ts_irq_handler(int irq, void *dev_id)
++{
++	struct ct363_ts *ts = dev_id;
++	int i;
++	int ret = 0;
++	int sync = 0, x, y, raw_x, raw_y;
++
++	ret = i2c_master_recv(ts->client, ts->buf,
++			      sizeof(struct ct363_ts_pointer) * ts->point_num);
++	if (ret < 0) {
++		dev_warn(&ts->client->dev, "%s: failed to read pointer data\n",
++			 __func__);
++		return IRQ_HANDLED;
++	}
++
++	for (i = 0; i < ts->point_num; i++) {
++		// release
++		if (ts->pts[i].status == 3) {
++			input_mt_slot(ts->input_dev, ts->pts[i].id - 1);
++			input_mt_report_slot_state(ts->input_dev,
++						   MT_TOOL_FINGER, false);
++
++			sync = 1;
++			continue;
++		}
++
++		// bad information
++		if (ts->pts[i].xhi == 0xFF || ts->pts[i].yhi == 0xFF ||
++		    (ts->pts[i].status != 1 && ts->pts[i].status != 2)) {
++			continue;
++		}
++
++		// get x and y
++		raw_x = (ts->pts[i].xhi << 4) | (ts->pts[i].xlo & 0xF);
++		raw_y = (ts->pts[i].yhi << 4) | (ts->pts[i].ylo & 0xF);
++
++		// update x and y depending of orientation
++		x = ts->orientation[0] * raw_x + ts->orientation[1] * raw_y;
++		y = ts->orientation[2] * raw_x + ts->orientation[3] * raw_y;
++
++		// outside of screen
++		if ((x > ts->max_x) || (y > ts->max_y) || (x < 0) || (y < 0)) {
++			continue;
++		}
++
++		// move or down
++		input_mt_slot(ts->input_dev, ts->pts[i].id - 1);
++		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, true);
++		input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 1);
++		input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x);
++		input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y);
++		input_report_abs(ts->input_dev, ABS_MT_PRESSURE,
++				 ts->pts[i].pressure);
++
++		dev_dbg(&ts->client->dev, "%s: pointer %d: x=%d, y=%d",
++			__func__, ts->pts[i].id, x, y);
++
++		sync = 1;
++	}
++
++	if (sync)
++		input_sync(ts->input_dev);
++
++	return IRQ_HANDLED;
++}
++
++static int ct363_ts_check(struct i2c_client *client)
++{
++	char buffer;
++	struct i2c_msg pkt = {
++		client->addr,
++		I2C_M_RD,
++		sizeof(buffer),
++		&buffer
++	};
++
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
++		dev_err(&client->dev,
++			"%s: adapter does not support I2C_FUNC_I2C\n",
++			__func__);
++		return -ENODEV;
++	}
++	if (i2c_transfer(client->adapter, &pkt, 1) != 1) {
++		dev_err(&client->dev, "%s: could not detect touchscreen.\n",
++			__func__);
++		return -ENODEV;
++	}
++
++	return 0;
++}
++
++static int ct363_ts_detect(struct i2c_client *client,
++                           struct i2c_board_info *info)
++{
++	int ret = ct363_ts_check(client);
++	if (ret == 0)
++		strlcpy(info->type, "ct363_ts", I2C_NAME_SIZE);
++	return ret;
++}
++
++static void ct363_ts_wakeup(struct ct363_ts *ts)
++{
++	gpio_set_value(ts->reset_gpio, !ts->reset_gpio_active_low);
++	msleep(50);
++	gpio_set_value(ts->reset_gpio, ts->reset_gpio_active_low);
++}
++
++static int ct363_ts_probe(struct i2c_client *client,
++                          const struct i2c_device_id *id)
++{
++	struct ct363_ts *ts;
++	struct device_node *np = client->dev.of_node;
++	int gpio;
++	int gpio_active_low;
++	enum of_gpio_flags gpio_flags;
++	int ret;
++
++	// check if touchscreen is here
++	ret = ct363_ts_check(client);
++	if (ret != 0)
++		return ret;
++
++	// allocate touchscreen data
++	ts = devm_kzalloc(&client->dev, sizeof(struct ct363_ts), GFP_KERNEL);
++	if (!ts) {
++		dev_err(&client->dev, "%s: failed to allocate memory\n",
++			__func__);
++		return -ENOMEM;
++	}
++
++	ts->client = client;
++	ts->point_num = CT363_TS_MAX_POINT;
++
++	// check device tree node
++	if (!np) {
++		dev_err(&client->dev, "%s: no device tree node\n", __func__);
++		return -EINVAL;
++	}
++
++	// get arguments
++	if (of_property_read_u32(np, "max-x", &ts->max_x)) {
++		dev_err(&client->dev, "%s: no max-x defined\n", __func__);
++		return -EINVAL;
++	}
++	if (of_property_read_u32(np, "max-y", &ts->max_y)) {
++		dev_err(&client->dev, "%s: no max-y defined\n", __func__);
++		return -EINVAL;
++	}
++	if (of_property_read_u32_array(np, "orientation", ts->orientation, 4)) {
++		dev_err(&client->dev, "%s: no orientation defined\n", __func__);
++		return -EINVAL;
++	}
++
++	// get reset gpio
++	gpio = of_get_named_gpio_flags(np, "reset-gpio", 0, &gpio_flags);
++	if (!gpio_is_valid(gpio)) {
++		dev_err(&client->dev, "%s: reset gpio %d invalid\n", __func__,
++			gpio);
++		return -ENODEV;
++	}
++	gpio_active_low = (gpio_flags & OF_GPIO_ACTIVE_LOW) ? 0 : 1;
++	ret = devm_gpio_request_one(&client->dev, gpio, gpio_active_low ?
++				    GPIOF_OUT_INIT_HIGH : GPIOF_OUT_INIT_LOW,
++				    "ct363_ts_reset_gpio");
++	if (ret != 0) {
++		dev_err(&client->dev, "%s: reset gpio %d request error: %d\n",
++			__func__, gpio, ret);
++		goto err_rst_gpio_request;
++	}
++	gpio_direction_output(gpio, gpio_active_low);
++	/* gpio_set_value(gpio, !gpio_active_low); */
++	/* msleep(500); */
++	/* gpio_set_value(gpio, gpio_active_low); */
++	/* gpio_free(gpio); */
++	ts->reset_gpio = gpio;
++	ts->reset_gpio_active_low = gpio_active_low;
++	ct363_ts_wakeup(ts);
++
++	// get touch gpio
++	gpio = of_get_named_gpio_flags(np, "touch-gpio", 0, &gpio_flags);
++	if (!gpio_is_valid(gpio)) {
++		dev_err(&client->dev, "%s: touch gpio %d invalid\n", __func__,
++			gpio);
++		return -ENODEV;
++	}
++	gpio_active_low = (gpio_flags & OF_GPIO_ACTIVE_LOW) ? 0 : 1;
++	ret = devm_gpio_request_one(&client->dev, gpio,
++				    gpio_flags,
++				    "ct363_ts_touch_gpio");
++	if (ret != 0) {
++		dev_err(&client->dev, "%s: touch gpio %d request error: %d\n",
++			__func__, gpio, ret);
++		goto err_irq_gpio_request;
++	}
++	gpio_direction_input(gpio);
++	ts->irq_gpio = gpio;
++	ts->irq = gpio_to_irq(gpio);
++	ret = devm_request_threaded_irq(&client->dev, ts->irq, NULL,
++					ct363_ts_irq_handler,
++					gpio_flags | IRQF_TRIGGER_FALLING |
++					IRQF_ONESHOT,
++					client->name, ts);
++	if (ret != 0) {
++		dev_err(&client->dev, "%s: threaded irq request error: %d\n",
++			__func__, ret);
++		goto err_request_threaded_irq;
++	}
++	disable_irq(ts->irq);
++
++	// allocate input device
++	ts->input_dev = devm_input_allocate_device(&client->dev);
++	if (!ts->input_dev) {
++		dev_err(&client->dev, "%s: failed to allocate input device\n",
++			__func__);
++		ret = -ENOMEM;
++		goto err_input_allocate_device;
++	}
++
++	// fill input device
++	ts->input_dev->name = "VTL CT363 Touchscreen";
++	snprintf(ts->phys, sizeof(ts->phys), "%s/input0", dev_name(&client->dev));
++	ts->input_dev->phys = ts->phys;
++	ts->input_dev->id.bustype = BUS_I2C;
++	ts->input_dev->dev.parent = &client->dev;
++	ts->input_dev->open = ct363_ts_open;
++	ts->input_dev->close = ct363_ts_close;
++	__set_bit(EV_ABS, ts->input_dev->evbit);
++	__set_bit(EV_KEY, ts->input_dev->evbit);
++	__set_bit(EV_SYN, ts->input_dev->evbit);
++	__set_bit(BTN_TOUCH, ts->input_dev->keybit);
++	__set_bit(INPUT_PROP_DIRECT, ts->input_dev->propbit);
++	// Simple touch
++	input_set_abs_params(ts->input_dev, ABS_X, 0, ts->max_x, 0, 0);
++	input_set_abs_params(ts->input_dev, ABS_Y, 0, ts->max_y, 0, 0);
++	// Multi touch
++	input_mt_init_slots(ts->input_dev, ts->point_num, 0);
++	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_X, 0, ts->max_x, 0,
++			     0);
++	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y, 0, ts->max_y, 0,
++			     0);
++	input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	input_set_abs_params(ts->input_dev, ABS_MT_WIDTH_MAJOR, 0, 255, 0, 0);
++
++	input_set_drvdata(ts->input_dev, ts);
++
++	// register device
++	ret = input_register_device(ts->input_dev);
++	if (ret < 0) {
++		dev_err(&client->dev, "%s: failed to register input device\n",
++			__func__);
++		goto err_input_register_device;
++	}
++
++	i2c_set_clientdata(client, ts);
++
++	dev_info(&client->dev, "%s succesfully initialized\n",
++		 ts->input_dev->name);
++	return 0;
++
++ err_input_register_device:
++	input_free_device(ts->input_dev);
++ err_input_allocate_device:
++	devm_free_irq(&client->dev, ts->irq, ts);
++ err_request_threaded_irq:
++	gpio_free(ts->irq_gpio);
++ err_irq_gpio_request:
++	gpio_free(ts->reset_gpio);
++ err_rst_gpio_request:
++	devm_kfree(&client->dev, ts);
++
++	return ret;
++}
++
++static int ct363_ts_remove(struct i2c_client *client)
++{
++	struct ct363_ts *ts = i2c_get_clientdata(client);
++
++	devm_free_irq(&client->dev, ts->irq, ts);
++	input_unregister_device(ts->input_dev);
++	input_free_device(ts->input_dev);
++	gpio_free(ts->irq_gpio);
++	gpio_free(ts->reset_gpio);
++	devm_kfree(&client->dev, ts);
++	i2c_set_clientdata(client, NULL);
++
++	return 0;
++}
++
++#ifdef CONFIG_PM_SLEEP
++static int ct363_ts_sleep(struct ct363_ts* ts)
++{
++	int ret;
++	char buf[3];
++
++	buf[0] = 0xFF;
++	buf[1] = 0x8F;
++	buf[2] = 0xFF;
++	i2c_master_send(ts->client, buf, 3);
++	if (ret < 0)
++		return ret;
++	mdelay(3);
++
++	buf[0] = 0x00;
++	buf[1] = 0xAF;
++	i2c_master_send(ts->client, buf, 2);
++	if (ret < 0)
++		return ret;
++	mdelay(3);
++
++	return 0;
++}
++
++static int ct363_ts_suspend(struct device *dev)
++{
++	int ret;
++	struct i2c_client *client = to_i2c_client(dev);
++	struct ct363_ts *ts = i2c_get_clientdata(client);
++
++	ct363_ts_sleep(ts);
++	if (ret < 0)
++		dev_warn(&client->dev, "%s: failed to go to sleep\n", __func__);
++	return ret;
++
++	if (device_may_wakeup(dev))
++		enable_irq_wake(ts->irq);
++
++	return 0;
++}
++
++static int ct363_ts_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct ct363_ts *ts = i2c_get_clientdata(client);
++
++	int i;
++
++	ct363_ts_wakeup(ts);
++
++	for (i = 0; i < ts->point_num; i++) {
++		input_mt_slot(ts->input_dev, i);
++		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER,
++					   false);
++	}
++
++	input_sync(ts->input_dev);
++
++	if (device_may_wakeup(dev))
++		disable_irq_wake(ts->irq);
++
++	return 0;
++}
++#endif
++
++static SIMPLE_DEV_PM_OPS(ct363_ts_pm_ops, ct363_ts_suspend, ct363_ts_resume);
++
++static const struct i2c_device_id ct363_ts_id[] = {
++	{ "ct363_ts", 0 },
++	{ }
++};
++
++MODULE_DEVICE_TABLE(i2c, ct363_ts_id);
++
++static struct i2c_driver ct363_ts_driver = {
++	.driver = {
++		.name	= "ct363_ts",
++		.owner	= THIS_MODULE,
++		.pm     = &ct363_ts_pm_ops,
++	},
++	.id_table   = ct363_ts_id,
++	.probe      = ct363_ts_probe,
++	.remove     = ct363_ts_remove,
++	.detect     = ct363_ts_detect,
++
++};
++
++module_i2c_driver(ct363_ts_driver);
++
++static int __init ct363_ts_init(void)
++{
++	int ret = i2c_add_driver(&ct363_ts_driver);
++	if (ret) {
++		printk(KERN_WARNING "%s: failed to add driver\n", "ct363_ts");
++		return ret;
++	}
++	printk(KERN_INFO "%s: driver added", "ct363_ts");
++	return 0;
++}
++
++static void __exit ct363_ts_exit(void)
++{
++	i2c_del_driver(&ct363_ts_driver);
++}
++
++module_init(ct363_ts_init);
++module_exit(ct363_ts_exit);
++
++MODULE_DESCRIPTION("VTL CT363 Touchscreen Driver");
++MODULE_LICENSE("GPL");
