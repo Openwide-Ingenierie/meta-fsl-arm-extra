@@ -237,7 +237,7 @@ index 0000000..a810e9b
 +
 +/ {
 +	aliases {
-+		mxcfb0 = &mxcfb3;
++		mxcfb0 = &mxcfb1;
 +	};
 +
 +	gpio-keys {
