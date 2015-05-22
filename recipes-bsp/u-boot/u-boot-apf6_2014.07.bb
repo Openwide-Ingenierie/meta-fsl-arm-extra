@@ -48,3 +48,5 @@ do_configure_prepend() {
     cp "${WORKDIR}/apf6-config.h" "${S}/include/configs/apf6.h"
 }
 
+SPL_BINARY="SPL"
+
